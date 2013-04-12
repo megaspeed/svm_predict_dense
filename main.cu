@@ -4,10 +4,16 @@
 #include <cuda_runtime_api.h>
 #include <cublas_v2.h>
 #include "device_launch_parameters.h"
+//#define USE_CUBLAS
+# define cudaCheck\
+ {\
+ cudaError_t err = cudaGetLastError ();\
+ if ( err != cudaSuccess ){\
+ printf(" cudaError = '%s' \n in '%s' %d\n", cudaGetErrorString( err ), __FILE__ , __LINE__ );\
+ exit(0);}}
 __global__ void dot_prod_dense(float *X, float *Z, int nrows, int ncols)
 {
 	unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
-	const unsigned int shift = gridDim.x*blockDim.x;
 	if (i < nrows)
 	{
 		float buf = 0;
@@ -19,13 +25,12 @@ __global__ void dot_prod_dense(float *X, float *Z, int nrows, int ncols)
 		Z[i] = buf;
 
 	}
-	__syncthreads();
 }
 // C = X * Y[i] : i = 0..nrows-1
+// C[nSV], X[nfeatures], 
 __global__ void dot_line(float *X, float *Y, float *Z, int nrows, int ncols)
 {
 	unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
-	const unsigned int shift = gridDim.x*blockDim.x;
 	if (i < nrows)
 	{
 		float buf = 0;
@@ -35,16 +40,13 @@ __global__ void dot_line(float *X, float *Y, float *Z, int nrows, int ncols)
 			buf +=X[j]*Y[i*ncols+j];
 		}
 		Z[i] = buf;
-
 	}
-	__syncthreads();
 }
 
 
 __global__ void reduction( float* d_k, float *d_dotSV, float *d_dotTV, float *d_koef, int nSV, int irow, int offset, float gamma, int kernelcode, float *result)
 {
 	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-	const unsigned int shift = gridDim.x*blockDim.x;
 	const unsigned int blockdim = blockDim.x;
 	const unsigned int tid = threadIdx.x;
 	__shared__ float reduction [MAXTHREADS];
@@ -73,71 +75,80 @@ __global__ void reduction( float* d_k, float *d_dotSV, float *d_dotTV, float *d_
 
 void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 {
+	float intervaltime;
+	float dotprodtime = 0;
+	float matmultime = 0;
+	float reductiontime = 0;
+	cudaEvent_t start, stop;
+	cudaEventCreate ( &start );cudaCheck
+	cudaEventCreate ( &stop  );cudaCheck
+
 	int nTV = test->nTV;
 	int nSV = model->nSV;
 	int nfeatures = model->nfeatures;
 
-	float *d_TV = 0;
-	
-
+	float *d_TV = 0;	
 	float *d_SV = 0;
-	cudaMalloc((void**) &d_SV, nSV*nfeatures*sizeof(float));
-	cudaMemcpy(d_SV, model->SV_dens, nSV*nfeatures*sizeof(float),cudaMemcpyHostToDevice);
+	cudaMalloc((void**) &d_SV, nSV*nfeatures*sizeof(float));cudaCheck
+	cudaMemcpy(d_SV, model->SV_dens, nSV*nfeatures*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
 
 	float *d_l_SV = 0;
-	cudaMalloc((void**) &d_l_SV, nSV*sizeof(float));
-	cudaMemcpy(d_l_SV, model->l_SV, nSV*sizeof(float),cudaMemcpyHostToDevice);
+	cudaMalloc((void**) &d_l_SV, nSV*sizeof(float));cudaCheck
+	cudaMemcpy(d_l_SV, model->l_SV, nSV*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
 
 	float *d_dotTV = 0;
-	cudaMalloc((void**) &d_dotTV, nTV*sizeof(float)); 
+	cudaMalloc((void**) &d_dotTV, nTV*sizeof(float)); cudaCheck
 
 	float *d_dotSV = 0;
-	cudaMalloc((void**) &d_dotSV, nSV*sizeof(float)); 
+	cudaMalloc((void**) &d_dotSV, nSV*sizeof(float)); cudaCheck
 
-	// Allocate device memory for F
-	
-
-
-	void* temp;
+	/*void* temp;
 	size_t pitch;
 	cudaMallocPitch(&temp, &pitch, nSV * sizeof(float),1);
-	cudaFree(temp);
+	cudaFree(temp);*/
 	unsigned int remainingMemory = 0;
 	unsigned int totalMemory = 0;
-	cudaMemGetInfo(&remainingMemory, &totalMemory);	
-	int cache_size = remainingMemory/pitch; // # of TVs in cache
+	cudaMemGetInfo(&remainingMemory, &totalMemory);	cudaCheck
+	//int cache_size = remainingMemory/pitch; // # of TVs in cache
+	int cache_size = remainingMemory/(nSV*sizeof(float)); // # of TVs in cache
 	if (nTV <= cache_size)
 	{
 		cache_size = nTV;
 	}
 	float *d_k = 0;
-	cudaMalloc((void**)&d_k, cache_size*nSV * sizeof(float));
-	cudaMalloc((void**) &d_TV, cache_size*nfeatures*sizeof(float));
+	cudaMalloc((void**)&d_k, cache_size*nSV * sizeof(float));cudaCheck
+	cudaMalloc((void**) &d_TV, cache_size*nfeatures*sizeof(float));cudaCheck
 	int nthreads = MAXTHREADS;
 	int nblocksSV = min(MAXBLOCKS, (nSV + nthreads - 1)/nthreads);
 	int nblocksTV = min(MAXBLOCKS, (nTV + nthreads - 1)/nthreads);
 	int nblocks_cache = min(MAXBLOCKS, (cache_size + nthreads - 1)/nthreads);
-
+	
+	// Allocate device memory for F
 	float* h_fdata= (float*) malloc(nblocks_cache*sizeof(float));
 	float* d_fdata=0;
-	cudaMalloc((void**) &d_fdata, nblocks_cache*sizeof(float));
+	cudaMalloc((void**) &d_fdata, nblocks_cache*sizeof(float));cudaCheck
 	cublasHandle_t handle;
 	cublasCreate_v2(&handle);
 	cublasSetPointerMode_v2(handle, CUBLAS_POINTER_MODE_DEVICE);
+	
 
-	/*float* dot= (float*) malloc(nSV*nTV*sizeof(float));
-	float* dot1= (float*) malloc(nSV*nTV*sizeof(float));
-	float* dot2= (float*) malloc(nSV*sizeof(float));
+	cudaEventRecord ( start, 0);cudaCheck
+#ifdef USE_CUBLAS
 	for(int i= 0; i<nSV; i++)
 		cublasSdot_v2(handle, nfeatures, &d_SV[i*nfeatures], 1, &d_SV[i*nfeatures], 1, &d_dotSV[i]);
 	for(int i= 0; i<nTV; i++)
-		cublasSdot_v2(handle, nfeatures, &d_TV[i*nfeatures], 1, &d_TV[i*nfeatures], 1, &d_dotTV[i]);	*/
-	dot_prod_dense<<<nblocksSV, nthreads>>>(d_SV, d_dotSV, nSV, nfeatures);
-	dot_prod_dense<<<nblocksTV, nthreads>>>(d_TV, d_dotTV, nTV, nfeatures);
-	int cc=0;
+		cublasSdot_v2(handle, nfeatures, &d_TV[i*nfeatures], 1, &d_TV[i*nfeatures], 1, &d_dotTV[i]);
+#else
+	dot_prod_dense<<<nblocksSV, nthreads>>>(d_SV, d_dotSV, nSV, nfeatures); cudaCheck
+	dot_prod_dense<<<nblocksTV, nthreads>>>(d_TV, d_dotTV, nTV, nfeatures); cudaCheck
+#endif
+	cudaEventRecord( stop, 0 );cudaCheck
+	cudaEventSynchronize( stop );cudaCheck
+	cudaEventElapsedTime ( &dotprodtime, start, stop );cudaCheck
+
+
 	int offset = 0;
-	float alfa = 1.;
-	float betta = 0;
+
 	int num_of_parts =  (nTV + cache_size - 1)/cache_size;
 	for (int ipart = 0; ipart < num_of_parts; ipart++)
 	{
@@ -146,18 +157,33 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 			cache_size = nTV - offset;
 		}
 			//Allocate Kernel Cache Memory
-		cudaMemcpy(&d_TV[offset*nfeatures], test->TV, cache_size*nfeatures*sizeof(float),cudaMemcpyHostToDevice);
+		cudaMemcpy(&d_TV[offset*nfeatures], test->TV, cache_size*nfeatures*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
 		for (int i = 0; i < cache_size; i++)
 		{
-			dot_line<<<nblocks_cache, nthreads>>>(&d_TV[i*nfeatures], d_SV, &d_k[i*nSV], cache_size, nfeatures);
-			//cudaMemcpy(dot, &d_k[i*nSV], nSV*sizeof(float), cudaMemcpyDeviceToHost);
-			/*for (int l = 0; l < nSV; l++)
+			cudaEventRecord ( start, 0);cudaCheck
+			
+			#ifdef USE_CUBLAS
+			for (int l = 0; l < nSV; l++)
 			{
 				cublasSdot_v2(handle, nfeatures, &d_TV[i*nfeatures], 1, &d_SV[l*nfeatures], 1, &d_k[i*nSV+l]);
-			}*/
+			}
+			#else
+			dot_line<<<nblocks_cache, nthreads>>>(&d_TV[i*nfeatures], d_SV, &d_k[i*nSV], nSV, nfeatures); cudaCheck
+			#endif
+			cudaEventRecord( stop, 0 );cudaCheck
+			cudaEventSynchronize( stop );cudaCheck
+			cudaEventElapsedTime ( &intervaltime, start, stop );cudaCheck
+			matmultime += intervaltime;
 
-			reduction<<<nblocks_cache, nthreads>>>(d_k, d_dotSV, d_dotTV, d_l_SV, nSV, i, offset, model->coef_gamma, model->kernel_type, d_fdata);
-			cudaMemcpy(h_fdata, d_fdata, nblocks_cache*sizeof(float), cudaMemcpyDeviceToHost);
+			cudaEventRecord ( start, 0);cudaCheck
+			reduction<<<nblocks_cache, nthreads>>>(d_k, d_dotSV, d_dotTV, d_l_SV, nSV, i, offset, model->coef_gamma, model->kernel_type, d_fdata);cudaCheck
+			cudaEventRecord( stop, 0 );cudaCheck
+			cudaEventSynchronize( stop );cudaCheck
+			cudaEventElapsedTime ( &intervaltime, start, stop );cudaCheck
+			reductiontime += intervaltime;
+			
+			cudaMemcpy(h_fdata, d_fdata, nblocks_cache*sizeof(float), cudaMemcpyDeviceToHost); cudaCheck 			
+
 			float sum = 0;
 			for (int k = 0; k < nblocks_cache; k++)
 			{
@@ -176,7 +202,20 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 
 		offset += cache_size;
 	}
-	cublasDestroy(handle);
+
+	cublasDestroy(handle); 
+	printf("Time of dot prods         %f\n", dotprodtime);
+	printf("Time of K                 %f\n", matmultime);
+	printf("Time of reduction         %f\n", reductiontime);
+	printf("Total cuda kernels time   %f\n", dotprodtime+matmultime+reductiontime);
+	cudaFree(d_dotSV);cudaCheck
+	cudaFree(d_dotTV);cudaCheck
+	cudaFree(d_fdata);cudaCheck
+	cudaFree(d_k);cudaCheck
+	cudaFree(d_l_SV);cudaCheck
+	cudaFree(d_SV);cudaCheck
+	cudaFree(d_TV);cudaCheck
+	cudaDeviceReset();cudaCheck
 }
 int main(int argc, char **argv)
 {
@@ -206,7 +245,7 @@ int main(int argc, char **argv)
 	parse_TV(input,&test->TV,&test->l_TV,&test->nTV,model->nfeatures);
 	fclose(input);
 
-	int* h_estimated_labels = (int*)malloc(model->nSV*sizeof(int));
+	int* h_estimated_labels = (int*)malloc(test->nTV*sizeof(int));
 	
 	classifier(model, test, h_estimated_labels);
 
@@ -221,5 +260,14 @@ int main(int argc, char **argv)
 	}
 	printf("# of testing samples %d, # errors %d, Rate %f\n", test->nTV, errors, 100* (float) (test->nTV -errors)/(float)test->nTV);
 
+	free(h_estimated_labels);
+	free(model->b);
+	free(model->label_set);
+	free(model->l_SV);
+	free(model->SV_dens);
+	free(model);
+	free(test->l_TV);
+	free(test->TV);
+	free(test);
 	return 0;
 }
