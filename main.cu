@@ -221,8 +221,8 @@ int main(int argc, char **argv)
 {
 	FILE *input;
 	argc = 4;
-	argv[1] = "C:\\Data\\b.txt";
-	argv[2] = "C:\\Data\\b.model";
+	argv[1] = ".\\Data\\b.txt";
+	argv[2] = ".\\Data\\b.model";
 	argv[3] = "10";
 
 	if(argc<4)
