@@ -23,7 +23,6 @@ __global__ void dot_prod_dense(float *X, float *Z, int nrows, int ncols)
 			buf +=X[i*ncols+j]*X[i*ncols+j];
 		}
 		Z[i] = buf;
-
 	}
 }
 // C = X * Y[i] : i = 0..nrows-1
@@ -42,8 +41,6 @@ __global__ void dot_line(float *X, float *Y, float *Z, int nrows, int ncols)
 		Z[i] = buf;
 	}
 }
-
-
 __global__ void reduction( float* d_k, float *d_dotSV, float *d_dotTV, float *d_koef, int nSV, int irow, int offset, float gamma, int kernelcode, float *result)
 {
 	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -72,7 +69,38 @@ __global__ void reduction( float* d_k, float *d_dotSV, float *d_dotTV, float *d_
 
 	if(tid==0){	result[blockIdx.x]=reduction[tid];}
 }
+__global__ void reduction1( float *d_SV, float *d_TV, float *d_koef, int nSV, int ncol, float gamma, int kernelcode, float *result)
+{
+	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+	const unsigned int blockdim = blockDim.x;
+	const unsigned int tid = threadIdx.x;
+	__shared__ float reduction [MAXTHREADS];
+	if (i < nSV)
+	{
+		if(kernelcode == 0)	
+		{
+			float val = 0;
+			for (int j = 0; j < ncol; j++)
+			{
+				val += (d_TV[j]-d_SV[i*ncol+j])*(d_TV[j]-d_SV[i*ncol+j]);
+			}
+			reduction[tid] =  d_koef[i]*expf(-gamma*val);
+		}
+	}
+	__syncthreads();
 
+	if(blockdim>=512)	{if(tid<256){reduction[tid] += reduction[tid + 256];}__syncthreads();}
+	if(blockdim>=256)	{if(tid<128){reduction[tid] += reduction[tid + 128];}__syncthreads();}
+	if(blockdim>=128)   {if(tid<64)	{reduction[tid] += reduction[tid + 64];}__syncthreads();}
+	if(tid<32){	if(blockdim >= 64)	{reduction[tid] += reduction[tid + 32];}
+	if(blockdim >= 32)	{reduction[tid] += reduction[tid + 16];}
+	if(blockdim >= 16)	{reduction[tid] += reduction[tid + 8];}
+	if(blockdim >= 8)	{reduction[tid] += reduction[tid + 4];}
+	if(blockdim >= 4)	{reduction[tid] += reduction[tid + 2];}
+	if(blockdim >= 2)	{reduction[tid] += reduction[tid + 1];}	}
+
+	if(tid==0){	result[blockIdx.x]=reduction[tid];}
+}
 void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 {
 	float intervaltime;
@@ -102,14 +130,9 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 	float *d_dotSV = 0;
 	cudaMalloc((void**) &d_dotSV, nSV*sizeof(float)); cudaCheck
 
-	/*void* temp;
-	size_t pitch;
-	cudaMallocPitch(&temp, &pitch, nSV * sizeof(float),1);
-	cudaFree(temp);*/
 	unsigned int remainingMemory = 0;
 	unsigned int totalMemory = 0;
 	cudaMemGetInfo(&remainingMemory, &totalMemory);	cudaCheck
-	//int cache_size = remainingMemory/pitch; // # of TVs in cache
 	int cache_size = remainingMemory/(nSV*sizeof(float)); // # of TVs in cache
 	if (nTV <= cache_size)
 	{
@@ -127,10 +150,11 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 	float* h_fdata= (float*) malloc(nblocks_cache*sizeof(float));
 	float* d_fdata=0;
 	cudaMalloc((void**) &d_fdata, nblocks_cache*sizeof(float));cudaCheck
+#ifdef USE_CUBLAS
 	cublasHandle_t handle;
 	cublasCreate_v2(&handle);
 	cublasSetPointerMode_v2(handle, CUBLAS_POINTER_MODE_DEVICE);
-	
+#endif	
 
 	cudaEventRecord ( start, 0);cudaCheck
 #ifdef USE_CUBLAS
@@ -157,7 +181,7 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 			cache_size = nTV - offset;
 		}
 			//Allocate Kernel Cache Memory
-		cudaMemcpy(&d_TV[offset*nfeatures], test->TV, cache_size*nfeatures*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
+		cudaMemcpy(d_TV, &test->TV[offset*nfeatures], cache_size*nfeatures*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
 		for (int i = 0; i < cache_size; i++)
 		{
 			cudaEventRecord ( start, 0);cudaCheck
@@ -177,6 +201,7 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 
 			cudaEventRecord ( start, 0);cudaCheck
 			reduction<<<nblocks_cache, nthreads>>>(d_k, d_dotSV, d_dotTV, d_l_SV, nSV, i, offset, model->coef_gamma, model->kernel_type, d_fdata);cudaCheck
+			//reduction1<<<nblocks_cache, nthreads>>>(d_SV, &d_TV[i*nfeatures], d_l_SV, nSV, nfeatures, model->coef_gamma, model->kernel_type, d_fdata);
 			cudaEventRecord( stop, 0 );cudaCheck
 			cudaEventSynchronize( stop );cudaCheck
 			cudaEventElapsedTime ( &intervaltime, start, stop );cudaCheck
@@ -189,7 +214,7 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 			{
 				sum += h_fdata[k];
 			}
-			sum += model->b[0];
+			sum -= model->b[0];
 			if (sum > 0)
 			{
 				h_l_estimated[i + offset] = model->label_set[0];
@@ -202,16 +227,17 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 
 		offset += cache_size;
 	}
-
+	#ifdef USE_CUBLAS
 	cublasDestroy(handle); 
+	#endif
 	printf("Time of dot prods         %f\n", dotprodtime);
 	printf("Time of K                 %f\n", matmultime);
 	printf("Time of reduction         %f\n", reductiontime);
 	printf("Total cuda kernels time   %f\n", dotprodtime+matmultime+reductiontime);
 	cudaFree(d_dotSV);cudaCheck
 	cudaFree(d_dotTV);cudaCheck
-	cudaFree(d_fdata);cudaCheck
 	cudaFree(d_k);cudaCheck
+	cudaFree(d_fdata);cudaCheck
 	cudaFree(d_l_SV);cudaCheck
 	cudaFree(d_SV);cudaCheck
 	cudaFree(d_TV);cudaCheck
@@ -221,9 +247,12 @@ int main(int argc, char **argv)
 {
 	FILE *input;
 	argc = 4;
-	argv[1] = ".\\Data\\b.txt";
+	/*argv[1] = ".\\Data\\b.txt";
 	argv[2] = ".\\Data\\b.model";
-	argv[3] = "10";
+	argv[3] = "10";*/
+	argv[1] = ".\\Data\\a9a.t";
+	argv[2] = ".\\Data\\a9a.model";
+	argv[3] = "123";
 
 	if(argc<4)
 		exit_with_help();

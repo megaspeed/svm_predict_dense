@@ -289,5 +289,3 @@ void exit_with_help()
 	printf("Usage: svm-predict test_file model_file #_of_features\n");
 	exit(1);
 }
-
-

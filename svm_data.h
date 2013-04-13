@@ -3,10 +3,7 @@
 #define MAXTHREADS 128
 #define MAXBLOCKS 9196
 #define KMEM 1
-
 #define min(a, b)  (((a) < (b)) ? (a) : (b))
-
-
 
 struct svm_test
 {
