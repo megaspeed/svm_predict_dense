@@ -1,6 +1,5 @@
 
 #include "common.cpp"
-#include "svm_data.h"
 #include <cuda_runtime_api.h>
 #include <cublas_v2.h>
 #include "device_launch_parameters.h"
@@ -10,7 +9,8 @@
  cudaError_t err = cudaGetLastError ();\
  if ( err != cudaSuccess ){\
  printf(" cudaError = '%s' \n in '%s' %d\n", cudaGetErrorString( err ), __FILE__ , __LINE__ );\
- /*exit(0);*/}}
+ exit(0);}}
+
 __global__ void dot_prod_dense(float *X, float *Z, int nrows, int ncols)
 {
 	unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
@@ -25,8 +25,6 @@ __global__ void dot_prod_dense(float *X, float *Z, int nrows, int ncols)
 		Z[i] = buf;
 	}
 }
-// C = X * Y[i] : i = 0..nrows-1
-// C[nSV], X[nfeatures], 
 __global__ void dot_line(float *X, float *Y, float *Z, int nrows, int ncols)
 {
 	unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
@@ -84,7 +82,7 @@ __global__ void reduction1( float *d_SV, float *d_TV, float *d_koef, int nSV, in
 	const unsigned int tid = threadIdx.x;
 	extern __shared__  float reduction [];
 	reduction[tid]= 0;
-	if (i < nSV)
+	while (i < nSV)
 	{
 		if(kernelcode == 0)	
 		{
@@ -93,8 +91,9 @@ __global__ void reduction1( float *d_SV, float *d_TV, float *d_koef, int nSV, in
 			{
 				val += (d_TV[j]-d_SV[i*ncol+j])*(d_TV[j]-d_SV[i*ncol+j]);
 			}
-			reduction[tid] =  d_koef[i]*exp(-gamma*val);
+			reduction[tid] +=  d_koef[i]*expf(-gamma*val);
 		}
+		i += blockSize*gridDim.x;
 	}
 	__syncthreads();
 		if(blockSize>=512)	{if(tid<256){reduction[tid] += reduction[tid + 256];}__syncthreads();}
@@ -106,21 +105,6 @@ __global__ void reduction1( float *d_SV, float *d_TV, float *d_koef, int nSV, in
 				if(blockSize >= 8)	{reduction[tid] += reduction[tid + 4];}
 				if(blockSize >= 4)	{reduction[tid] += reduction[tid + 2];}
 				if(blockSize >= 2)	{reduction[tid] += reduction[tid + 1];}	}
-	//for (int s = blockDim.x/2; s > 32; s >>= 1)
-	//{
-	//	if (tid < s)	
-	//		reduction[tid] += reduction[tid + s];
-	//	__syncthreads();
-	//}
-	//if(tid<32)
-	//{
-	//	reduction[tid] += reduction[tid + 32];
-	//	reduction[tid] += reduction[tid + 16];
-	//	reduction[tid] += reduction[tid + 8];
-	//	reduction[tid] += reduction[tid + 4];
-	//	reduction[tid] += reduction[tid + 2];
-	//	reduction[tid] += reduction[tid + 1];
-	//}
 	if(tid==0){	result[blockIdx.x]=reduction[0];}
 
 }
@@ -146,8 +130,8 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 	cudaMalloc((void**) &d_l_SV, nSV*sizeof(float));cudaCheck
 	cudaMemcpy(d_l_SV, model->l_SV, nSV*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
 
-	unsigned int remainingMemory = 0;
-	unsigned int totalMemory = 0;
+	size_t remainingMemory = 0;
+	size_t totalMemory = 0;
 	cudaMemGetInfo(&remainingMemory, &totalMemory);	cudaCheck
 	int cache_size = remainingMemory/(nSV*sizeof(float)); // # of TVs in cache
 	if (nTV <= cache_size){	cache_size = nTV; }
@@ -175,13 +159,7 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 		cudaMemcpy(d_TV, &test->TV[offset*nfeatures], cache_size*nfeatures*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
 			for (int i = 0; i < cache_size; i++)
 			{				
-				cudaEventRecord ( start, 0);cudaCheck
-				reduction1<<<nblocks_SV, MAXTHREADS,MAXTHREADS>>>(d_SV, &d_TV[i*nfeatures], d_l_SV, nSV, nfeatures, model->coef_gamma, model->kernel_type, d_fdata);cudaCheck
-				cudaEventRecord( stop, 0 );cudaCheck
-				cudaEventSynchronize( stop );cudaCheck
-				cudaEventElapsedTime ( &intervaltime, start, stop );cudaCheck
-				reductiontime += intervaltime;
-
+				reduction1<<<nblocks_SV, MAXTHREADS, MAXTHREADS*sizeof(float)>>>(d_SV, &d_TV[i*nfeatures], d_l_SV, nSV, nfeatures, model->coef_gamma, model->kernel_type, d_fdata);cudaCheck
 				cudaMemcpy(h_fdata, d_fdata, nblocks_SV*sizeof(float), cudaMemcpyDeviceToHost); cudaCheck
 
 				float sum = 0;
@@ -200,8 +178,6 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 			}
 			offset += cache_size;
 	}
-
-	printf("Time of reduction         %f\n", reductiontime);
 	cudaFree(d_fdata);cudaCheck
 	cudaFree(d_l_SV);cudaCheck
 	cudaFree(d_SV);cudaCheck
@@ -211,13 +187,25 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 int main(int argc, char **argv)
 {
 	FILE *input;
+	if (argc==1)
+	{
 	argc = 4;
-	argv[1] = "C:\\Data\\b.txt";
-	argv[2] = "C:\\Data\\b.model";
-	argv[3] = "10";
-	//argv[1] = "C:\\Data\\a9a.t";
-	//argv[2] = "C:\\Data\\a9a.model";
+	//argv[1] = "C:\\Data\\b.txt";
+	//argv[2] = "C:\\Data\\b.model";
+	//argv[3] = "10";
+	//argv[1] = "..\\Data\\a9a.t";
+	//argv[2] = "..\\Data\\a9a.model";
 	//argv[3] = "123";
+	argv[1] = "..\\Data\\cod.t";
+	argv[2] = "..\\Data\\cod.model";
+	argv[3] = "8";
+	//argv[1] = "..\\Data\\cov.t";
+	//argv[2] = "..\\Data\\cov.model";
+	//argv[3] = "54";
+	//argv[1] = "..\\Data\\gisette_scale.t";
+	//argv[2] = "..\\Data\\gisette.model";
+	//argv[3] = "5000";
+	}
 
 	if(argc<4)
 		exit_with_help();
@@ -241,10 +229,11 @@ int main(int argc, char **argv)
 
 	int* h_estimated_labels = (int*)malloc(test->nTV*sizeof(int));
 
-	classifier(model, test, h_estimated_labels);
+	cuResetTimer();
+	classifier(model, test, h_estimated_labels);	
+	float time = cuGetTimer();
 
 	int errors=0;
-
 	for (int i=0; i<test->nTV; i++)
 	{
 		if( test->l_TV[i]!=h_estimated_labels[i])
@@ -252,8 +241,7 @@ int main(int argc, char **argv)
 			errors++;
 		}
 	}
-	printf("# of testing samples %d, # errors %d, Rate %f\n", test->nTV, errors, 100* (float) (test->nTV -errors)/(float)test->nTV);
-
+	printf("# of testing samples %d, # errors %d, Rate %f Time: %f\n", test->nTV, errors, 100* (float) (test->nTV -errors)/(float)test->nTV, time);
 	free(h_estimated_labels);
 	free(model->b);
 	free(model->label_set);

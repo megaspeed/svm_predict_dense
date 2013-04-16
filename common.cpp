@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "svm_data.h"
+
 static char* readline(FILE *input, char* line, int *max_line_len)
 {
 	int len;
@@ -234,7 +235,7 @@ int read_model(const char* model_file_name, svm_model *model, int nfeatures)
 			}
 		}
 		else if(strcmp(cmd,"degree")==0)
-			fscanf(fp,"%d",&model->coef_d);
+			fscanf(fp,"%f",&model->coef_d);
 		else if(strcmp(cmd,"gamma")==0)
 			fscanf(fp,"%f",&model->coef_gamma);
 		else if(strcmp(cmd,"coef0")==0)
