@@ -4,13 +4,13 @@
 #include <cuda_runtime_api.h>
 #include <cublas_v2.h>
 #include "device_launch_parameters.h"
-//#define USE_CUBLAS
+
 # define cudaCheck\
  {\
  cudaError_t err = cudaGetLastError ();\
  if ( err != cudaSuccess ){\
  printf(" cudaError = '%s' \n in '%s' %d\n", cudaGetErrorString( err ), __FILE__ , __LINE__ );\
- exit(0);}}
+ /*exit(0);*/}}
 __global__ void dot_prod_dense(float *X, float *Z, int nrows, int ncols)
 {
 	unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
@@ -41,40 +41,49 @@ __global__ void dot_line(float *X, float *Y, float *Z, int nrows, int ncols)
 		Z[i] = buf;
 	}
 }
-__global__ void reduction( float* d_k, float *d_dotSV, float *d_dotTV, float *d_koef, int nSV, int irow, int offset, float gamma, int kernelcode, float *result)
-{
-	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-	const unsigned int blockdim = blockDim.x;
-	const unsigned int tid = threadIdx.x;
-	__shared__ float reduction [MAXTHREADS];
-	if (i < nSV)
-	{
-		if(kernelcode == 0)	
-		{
-			float val =  gamma * (2*d_k[irow*nSV+i]-d_dotSV[i]-d_dotTV[irow+offset]);
-			reduction[tid] =  d_koef[i]*expf(val);
-		}
-	}
-	__syncthreads();
-
-	if(blockdim>=512)	{if(tid<256){reduction[tid] += reduction[tid + 256];}__syncthreads();}
-	if(blockdim>=256)	{if(tid<128){reduction[tid] += reduction[tid + 128];}__syncthreads();}
-	if(blockdim>=128)   {if(tid<64)	{reduction[tid] += reduction[tid + 64];}__syncthreads();}
-	if(tid<32){	if(blockdim >= 64)	{reduction[tid] += reduction[tid + 32];}
-	if(blockdim >= 32)	{reduction[tid] += reduction[tid + 16];}
-	if(blockdim >= 16)	{reduction[tid] += reduction[tid + 8];}
-	if(blockdim >= 8)	{reduction[tid] += reduction[tid + 4];}
-	if(blockdim >= 4)	{reduction[tid] += reduction[tid + 2];}
-	if(blockdim >= 2)	{reduction[tid] += reduction[tid + 1];}	}
-
-	if(tid==0){	result[blockIdx.x]=reduction[tid];}
-}
+//__global__ void reduction( float* d_k, float *d_dotSV, float *d_dotTV, float *d_koef, int nSV, int irow, int offset, float gamma, int kernelcode, float *result)
+//{
+//	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+//	const unsigned int blockdim = blockDim.x;
+//	const unsigned int tid = threadIdx.x;
+//	__shared__ float reduction [MAXTHREADS];
+//	if (i < nSV)
+//	{
+//		if(kernelcode == 0)	
+//		{
+//			float val =  gamma * (2*d_k[irow*nSV+i]-d_dotSV[i]-d_dotTV[irow+offset]);
+//			reduction[tid] =  d_koef[i]*expf(val);
+//		}
+//	}
+//	__syncthreads();
+//	if (i < nSV)
+//	{
+//
+//		for (int s = blockDim.x/2; s > 32; s >>= 1)
+//		{
+//			if (tid < 32)	
+//				reduction[tid] += reduction[tid + s];
+//			__syncthreads();
+//		}
+//		if(tid<32)
+//		{
+//			reduction[tid] += reduction[tid + 32];
+//			reduction[tid] += reduction[tid + 16];
+//			reduction[tid] += reduction[tid + 8];
+//			reduction[tid] += reduction[tid + 4];
+//			reduction[tid] += reduction[tid + 2];
+//			reduction[tid] += reduction[tid + 1];	
+//		}
+//		if(tid==0){	result[blockIdx.x]=reduction[tid];}
+//	}
+//}
 __global__ void reduction1( float *d_SV, float *d_TV, float *d_koef, int nSV, int ncol, float gamma, int kernelcode, float *result)
 {
 	unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-	const unsigned int blockdim = blockDim.x;
+	const unsigned int blockSize = blockDim.x;
 	const unsigned int tid = threadIdx.x;
-	__shared__ float reduction [MAXTHREADS];
+	extern __shared__  float reduction [];
+	reduction[tid]= 0;
 	if (i < nSV)
 	{
 		if(kernelcode == 0)	
@@ -84,29 +93,42 @@ __global__ void reduction1( float *d_SV, float *d_TV, float *d_koef, int nSV, in
 			{
 				val += (d_TV[j]-d_SV[i*ncol+j])*(d_TV[j]-d_SV[i*ncol+j]);
 			}
-			reduction[tid] =  d_koef[i]*expf(-gamma*val);
+			reduction[tid] =  d_koef[i]*exp(-gamma*val);
 		}
 	}
 	__syncthreads();
+		if(blockSize>=512)	{if(tid<256){reduction[tid] += reduction[tid + 256];}__syncthreads();}
+	if(blockSize>=256)	{if(tid<128){reduction[tid] += reduction[tid + 128];}__syncthreads();}
+	if(blockSize>=128)  {if(tid<64)	{reduction[tid] += reduction[tid + 64];}__syncthreads();}
+	if(tid<32){	if(blockSize >= 64)	{reduction[tid] += reduction[tid + 32];}
+				if(blockSize >= 32)	{reduction[tid] += reduction[tid + 16];}
+				if(blockSize >= 16)	{reduction[tid] += reduction[tid + 8];}
+				if(blockSize >= 8)	{reduction[tid] += reduction[tid + 4];}
+				if(blockSize >= 4)	{reduction[tid] += reduction[tid + 2];}
+				if(blockSize >= 2)	{reduction[tid] += reduction[tid + 1];}	}
+	//for (int s = blockDim.x/2; s > 32; s >>= 1)
+	//{
+	//	if (tid < s)	
+	//		reduction[tid] += reduction[tid + s];
+	//	__syncthreads();
+	//}
+	//if(tid<32)
+	//{
+	//	reduction[tid] += reduction[tid + 32];
+	//	reduction[tid] += reduction[tid + 16];
+	//	reduction[tid] += reduction[tid + 8];
+	//	reduction[tid] += reduction[tid + 4];
+	//	reduction[tid] += reduction[tid + 2];
+	//	reduction[tid] += reduction[tid + 1];
+	//}
+	if(tid==0){	result[blockIdx.x]=reduction[0];}
 
-	if(blockdim>=512)	{if(tid<256){reduction[tid] += reduction[tid + 256];}__syncthreads();}
-	if(blockdim>=256)	{if(tid<128){reduction[tid] += reduction[tid + 128];}__syncthreads();}
-	if(blockdim>=128)   {if(tid<64)	{reduction[tid] += reduction[tid + 64];}__syncthreads();}
-	if(tid<32){	if(blockdim >= 64)	{reduction[tid] += reduction[tid + 32];}
-	if(blockdim >= 32)	{reduction[tid] += reduction[tid + 16];}
-	if(blockdim >= 16)	{reduction[tid] += reduction[tid + 8];}
-	if(blockdim >= 8)	{reduction[tid] += reduction[tid + 4];}
-	if(blockdim >= 4)	{reduction[tid] += reduction[tid + 2];}
-	if(blockdim >= 2)	{reduction[tid] += reduction[tid + 1];}	}
-
-	if(tid==0){	result[blockIdx.x]=reduction[tid];}
 }
+
 void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 {
-	float intervaltime;
-	float dotprodtime = 0;
-	float matmultime = 0;
 	float reductiontime = 0;
+	float intervaltime;
 	cudaEvent_t start, stop;
 	cudaEventCreate ( &start );cudaCheck
 	cudaEventCreate ( &stop  );cudaCheck
@@ -120,123 +142,66 @@ void classifier(svm_model *model, svm_test *test, int *h_l_estimated )
 	cudaMalloc((void**) &d_SV, nSV*nfeatures*sizeof(float));cudaCheck
 	cudaMemcpy(d_SV, model->SV_dens, nSV*nfeatures*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
 
-	float *d_l_SV = 0;
+		float *d_l_SV = 0;
 	cudaMalloc((void**) &d_l_SV, nSV*sizeof(float));cudaCheck
 	cudaMemcpy(d_l_SV, model->l_SV, nSV*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
-
-	float *d_dotTV = 0;
-	cudaMalloc((void**) &d_dotTV, nTV*sizeof(float)); cudaCheck
-
-	float *d_dotSV = 0;
-	cudaMalloc((void**) &d_dotSV, nSV*sizeof(float)); cudaCheck
 
 	unsigned int remainingMemory = 0;
 	unsigned int totalMemory = 0;
 	cudaMemGetInfo(&remainingMemory, &totalMemory);	cudaCheck
 	int cache_size = remainingMemory/(nSV*sizeof(float)); // # of TVs in cache
-	if (nTV <= cache_size)
-	{
-		cache_size = nTV;
-	}
-	float *d_k = 0;
-	cudaMalloc((void**)&d_k, cache_size*nSV * sizeof(float));cudaCheck
+	if (nTV <= cache_size){	cache_size = nTV; }
+
 	cudaMalloc((void**) &d_TV, cache_size*nfeatures*sizeof(float));cudaCheck
+
 	int nthreads = MAXTHREADS;
-	int nblocksSV = min(MAXBLOCKS, (nSV + nthreads - 1)/nthreads);
-	int nblocksTV = min(MAXBLOCKS, (nTV + nthreads - 1)/nthreads);
 	int nblocks_cache = min(MAXBLOCKS, (cache_size + nthreads - 1)/nthreads);
-	
+	int nblocks_SV = min(MAXBLOCKS, (nSV + nthreads - 1)/nthreads);
+	dim3 dim_block = dim3(nblocks_cache, 1, 1);
+	dim3 dim_thread = dim3(MAXTHREADS, 1, 1);
 	// Allocate device memory for F
-	float* h_fdata= (float*) malloc(nblocks_cache*sizeof(float));
+	float* h_fdata= (float*) malloc(nblocks_SV*sizeof(float));
 	float* d_fdata=0;
-	cudaMalloc((void**) &d_fdata, nblocks_cache*sizeof(float));cudaCheck
-#ifdef USE_CUBLAS
-	cublasHandle_t handle;
-	cublasCreate_v2(&handle);
-	cublasSetPointerMode_v2(handle, CUBLAS_POINTER_MODE_DEVICE);
-#endif	
-
-	cudaEventRecord ( start, 0);cudaCheck
-#ifdef USE_CUBLAS
-	for(int i= 0; i<nSV; i++)
-		cublasSdot_v2(handle, nfeatures, &d_SV[i*nfeatures], 1, &d_SV[i*nfeatures], 1, &d_dotSV[i]);
-	for(int i= 0; i<nTV; i++)
-		cublasSdot_v2(handle, nfeatures, &d_TV[i*nfeatures], 1, &d_TV[i*nfeatures], 1, &d_dotTV[i]);
-#else
-	dot_prod_dense<<<nblocksSV, nthreads>>>(d_SV, d_dotSV, nSV, nfeatures); cudaCheck
-	dot_prod_dense<<<nblocksTV, nthreads>>>(d_TV, d_dotTV, nTV, nfeatures); cudaCheck
-#endif
-	cudaEventRecord( stop, 0 );cudaCheck
-	cudaEventSynchronize( stop );cudaCheck
-	cudaEventElapsedTime ( &dotprodtime, start, stop );cudaCheck
-
-
+	cudaMalloc((void**) &d_fdata, nblocks_SV*sizeof(float));cudaCheck
 	int offset = 0;
-
 	int num_of_parts =  (nTV + cache_size - 1)/cache_size;
+
 	for (int ipart = 0; ipart < num_of_parts; ipart++)
 	{
 		if ((ipart == (num_of_parts - 1)) && ((nTV - offset) != 0) )
 		{
 			cache_size = nTV - offset;
 		}
-			//Allocate Kernel Cache Memory
 		cudaMemcpy(d_TV, &test->TV[offset*nfeatures], cache_size*nfeatures*sizeof(float),cudaMemcpyHostToDevice);cudaCheck
-		for (int i = 0; i < cache_size; i++)
-		{
-			cudaEventRecord ( start, 0);cudaCheck
-			
-			#ifdef USE_CUBLAS
-			for (int l = 0; l < nSV; l++)
-			{
-				cublasSdot_v2(handle, nfeatures, &d_TV[i*nfeatures], 1, &d_SV[l*nfeatures], 1, &d_k[i*nSV+l]);
-			}
-			#else
-			dot_line<<<nblocks_cache, nthreads>>>(&d_TV[i*nfeatures], d_SV, &d_k[i*nSV], nSV, nfeatures); cudaCheck
-			#endif
-			cudaEventRecord( stop, 0 );cudaCheck
-			cudaEventSynchronize( stop );cudaCheck
-			cudaEventElapsedTime ( &intervaltime, start, stop );cudaCheck
-			matmultime += intervaltime;
+			for (int i = 0; i < cache_size; i++)
+			{				
+				cudaEventRecord ( start, 0);cudaCheck
+				reduction1<<<nblocks_SV, MAXTHREADS,MAXTHREADS>>>(d_SV, &d_TV[i*nfeatures], d_l_SV, nSV, nfeatures, model->coef_gamma, model->kernel_type, d_fdata);cudaCheck
+				cudaEventRecord( stop, 0 );cudaCheck
+				cudaEventSynchronize( stop );cudaCheck
+				cudaEventElapsedTime ( &intervaltime, start, stop );cudaCheck
+				reductiontime += intervaltime;
 
-			cudaEventRecord ( start, 0);cudaCheck
-			reduction<<<nblocks_cache, nthreads>>>(d_k, d_dotSV, d_dotTV, d_l_SV, nSV, i, offset, model->coef_gamma, model->kernel_type, d_fdata);cudaCheck
-			//reduction1<<<nblocks_cache, nthreads>>>(d_SV, &d_TV[i*nfeatures], d_l_SV, nSV, nfeatures, model->coef_gamma, model->kernel_type, d_fdata);
-			cudaEventRecord( stop, 0 );cudaCheck
-			cudaEventSynchronize( stop );cudaCheck
-			cudaEventElapsedTime ( &intervaltime, start, stop );cudaCheck
-			reductiontime += intervaltime;
-			
-			cudaMemcpy(h_fdata, d_fdata, nblocks_cache*sizeof(float), cudaMemcpyDeviceToHost); cudaCheck 			
+				cudaMemcpy(h_fdata, d_fdata, nblocks_SV*sizeof(float), cudaMemcpyDeviceToHost); cudaCheck
 
-			float sum = 0;
-			for (int k = 0; k < nblocks_cache; k++)
-			{
-				sum += h_fdata[k];
-			}
-			sum -= model->b[0];
-			if (sum > 0)
-			{
-				h_l_estimated[i + offset] = model->label_set[0];
-			}
-			else
-			{
-				h_l_estimated[i + offset] = model->label_set[1];
-			}
-		}
+				float sum = 0;
+				for (int k = 0; k < nblocks_SV; k++)
+					sum += h_fdata[k];
 
-		offset += cache_size;
+				sum -= model->b[0];
+				if (sum > 0)
+				{
+					h_l_estimated[i + offset] = model->label_set[0];
+				}
+				else
+				{
+					h_l_estimated[i + offset] = model->label_set[1];
+				}
+			}
+			offset += cache_size;
 	}
-	#ifdef USE_CUBLAS
-	cublasDestroy(handle); 
-	#endif
-	printf("Time of dot prods         %f\n", dotprodtime);
-	printf("Time of K                 %f\n", matmultime);
+
 	printf("Time of reduction         %f\n", reductiontime);
-	printf("Total cuda kernels time   %f\n", dotprodtime+matmultime+reductiontime);
-	cudaFree(d_dotSV);cudaCheck
-	cudaFree(d_dotTV);cudaCheck
-	cudaFree(d_k);cudaCheck
 	cudaFree(d_fdata);cudaCheck
 	cudaFree(d_l_SV);cudaCheck
 	cudaFree(d_SV);cudaCheck
@@ -247,12 +212,12 @@ int main(int argc, char **argv)
 {
 	FILE *input;
 	argc = 4;
-	/*argv[1] = ".\\Data\\b.txt";
-	argv[2] = ".\\Data\\b.model";
-	argv[3] = "10";*/
-	argv[1] = ".\\Data\\a9a.t";
-	argv[2] = ".\\Data\\a9a.model";
-	argv[3] = "123";
+	argv[1] = "C:\\Data\\b.txt";
+	argv[2] = "C:\\Data\\b.model";
+	argv[3] = "10";
+	//argv[1] = "C:\\Data\\a9a.t";
+	//argv[2] = "C:\\Data\\a9a.model";
+	//argv[3] = "123";
 
 	if(argc<4)
 		exit_with_help();
@@ -275,7 +240,7 @@ int main(int argc, char **argv)
 	fclose(input);
 
 	int* h_estimated_labels = (int*)malloc(test->nTV*sizeof(int));
-	
+
 	classifier(model, test, h_estimated_labels);
 
 	int errors=0;

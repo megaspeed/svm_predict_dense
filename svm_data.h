@@ -1,8 +1,9 @@
 #ifndef _SVM_DATA_H_
 #define _SVM_DATA_H_
-#define MAXTHREADS 128
+#define MAXTHREADS 64
 #define MAXBLOCKS 9196
 #define KMEM 1
+#define NTV 32
 #define min(a, b)  (((a) < (b)) ? (a) : (b))
 
 struct svm_test

@@ -121,7 +121,7 @@ int parse_TV(FILE* inputFilePointer, float** h_xdata, int** h_ldata, int *nsampl
 		++(*nsamples);
 	}
 	rewind(inputFilePointer);
-
+	//*nsamples = NTV;
 	*h_xdata = (float*) calloc( *nsamples*nfeatures,sizeof(float));
 	*h_ldata = (int*) calloc( *nsamples,sizeof(int));
 
