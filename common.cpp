@@ -187,7 +187,6 @@ int read_model(const char* model_file_name, svm_model *model, int nfeatures)
 	const char *svm_type_table[] = { "c_svc","nu_svc","one_class","epsilon_svr","nu_svr",0 };
 	const char *kernel_type_table[] = { "rbf","linear","polynomial","sigmoid","precomputed",0 };
 	// read parameters
-	model->nSV = NULL;
 	model->SV_dens = NULL;
 	model->l_SV = NULL;
 	model->label_set = NULL;

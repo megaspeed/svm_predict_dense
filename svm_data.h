@@ -1,12 +1,11 @@
 #ifndef _SVM_DATA_H_
 #define _SVM_DATA_H_
 #define MAXTHREADS 128
-#define MAXBLOCKS 49152/MAXTHREADS
-#define KMEM 1
-#define NTV 32
+#define MAXSHAREDMEM 49152
+#define MAXBLOCKS MAXSHAREDMEM/MAXTHREADS
 #define min(a, b)  (((a) < (b)) ? (a) : (b))
 
-struct svm_test
+struct svm_sample
 {
 	int nTV;				/*# of test vectors/samples */
 	int *l_TV;				/*	TV's labels				*/
@@ -27,6 +26,9 @@ struct svm_model
 	float coef_d;
 	float coef_gamma;
 	float coef_b;
+	float C;
+	float *params;		/*	params C_i, gamma_i for RBF*/
+	int	ntasks;
 };
 
 #endif
